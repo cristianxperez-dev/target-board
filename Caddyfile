@@ -1,0 +1,95 @@
+# ============================================================================
+# Deadline Board — Caddy web server configuration
+#
+# Serves the static application out of /srv/public.
+#
+# Railway terminates HTTPS at its edge and forwards plain HTTP to the container
+# on the port given in $PORT. So this server listens on HTTP only and must NOT
+# try to obtain its own certificates.
+# ============================================================================
+{
+	# Railway handles TLS. Asking Caddy to manage certificates here would make it
+	# attempt an ACME challenge it cannot complete, and the deploy would hang.
+	auto_https off
+
+	# The admin API (normally on localhost:2019) is not needed and is one less
+	# thing listening inside the container.
+	admin off
+
+	# Railway captures stdout as the deploy log.
+	log {
+		output stdout
+		format console
+	}
+}
+
+# $PORT is supplied by Railway. The :8080 fallback lets the same image run
+# locally with no environment set.
+:{$PORT:8080} {
+	# ---- Health check -------------------------------------------------------
+	# Railway polls this to decide whether a new deploy is live. handle blocks
+	# are evaluated in order and are mutually exclusive, which keeps this ahead
+	# of the file server without relying on Caddy's directive ordering.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# ---- The application ----------------------------------------------------
+	handle {
+		root * /srv/public
+
+		# Compress text responses. index.html is ~500 KB of HTML, CSS and JS in
+		# one file, so this is the single biggest win available: it typically
+		# cuts the transfer to well under 100 KB.
+		encode zstd gzip
+
+		# config.js is generated fresh on every container start from the Railway
+		# environment variables. It must never be cached, or a browser could keep
+		# using the previous deploy's Supabase settings.
+		@config path /config.js
+		header @config {
+			Cache-Control "no-store, must-revalidate"
+		}
+
+		# The application itself is a single file that changes on each deploy.
+		# no-cache means "revalidate before use" rather than "never store", so
+		# repeat loads are a cheap 304 rather than a full re-download.
+		@html path / /index.html
+		header @html {
+			Cache-Control "no-cache"
+		}
+
+		# Anything added later under /assets/ can be cached hard, because such
+		# files should carry a content hash in their name.
+		@assets path /assets/*
+		header @assets {
+			Cache-Control "public, max-age=31536000, immutable"
+		}
+
+		# ---- Security headers -------------------------------------------------
+		header {
+			# Stop browsers guessing a different content type than we sent.
+			X-Content-Type-Options "nosniff"
+			# Disallow framing, so the board cannot be embedded in another site.
+			X-Frame-Options "DENY"
+			# Do not leak the board URL to third-party sites.
+			Referrer-Policy "strict-origin-when-cross-origin"
+			# No geolocation, camera or microphone is used by this application.
+			Permissions-Policy "geolocation=(), camera=(), microphone=()"
+			# Tell Railway's edge this response is only valid over HTTPS.
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			# Do not advertise the server software.
+			-Server
+		}
+
+		# NOTE ON Content-Security-Policy
+		# A strict CSP is deliberately not set here. The application is a single
+		# self-contained HTML file whose CSS and ~7,500 lines of JavaScript are
+		# inline, so any workable policy would need 'unsafe-inline' and would
+		# provide little real protection while risking breakage. The honest
+		# position is to leave it off now and add a real one (with hashed inline
+		# scripts) if and when the application is split into separate files.
+
+		file_server
+	}
+}
